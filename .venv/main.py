@@ -232,9 +232,27 @@ async def process_username(message: types.Message, state: FSMContext):
         await state.clear()
         return await message.answer("❌ Создание чека отменено.", reply_markup=types.ReplyKeyboardRemove())
 
-    username = message.text.strip().lower()
-    if not get_user_id(username):
-        return await message.answer("❌ Пользователь не найден! Проверьте юзернейм.")
+    users = load_users()
+    input_data = message.text.strip().lower()
+
+    # Поиск по юзернейму
+    if input_data in users:
+        username = input_data
+        await message.answer(f"✅ Найден пользователь по юзернейму: @{username}")
+    else:
+        # Поиск по user_id
+        user_by_id = next((username for username, data in users.items() if str(data["user_id"]) == input_data), None)
+        if user_by_id:
+            username = user_by_id
+            await message.answer(f"✅ Найден пользователь по user_id: @{username}")
+        else:
+            # Поиск по заметке
+            user_by_note = next((username for username, data in users.items() if input_data in data.get("note", "").lower()), None)
+            if user_by_note:
+                username = user_by_note
+                await message.answer(f"✅ Найден пользователь по заметке: @{username}")
+            else:
+                return await message.answer("❌ Пользователь не найден! Проверьте введенные данные.")
 
     await state.update_data(username=username)
     await state.set_state(CheckForm.date)
@@ -388,7 +406,6 @@ async def confirm_check(callback_query: types.CallbackQuery):
         logger.error(f"Ошибка записи в Google Sheets: {str(e)}", exc_info=True)
         success = False
 
-    # Уведомление админам
     for admin_id in ADMIN_IDS:
         try:
             await bot.send_message(
@@ -397,8 +414,6 @@ async def confirm_check(callback_query: types.CallbackQuery):
                 f"Суммы: {check_data['amount1']}/{check_data['amount2']}\n"
                 f"ФИО: {check_data['fullname']}\n"
                 f"Статус: {'Принят ✅' if success else 'Ошибка записи ❌'}\n"
-                f"Картель: Вызван"
-                f"Свага: Присутствует"
                 f"Подтвердил: @{callback_query.from_user.username}"
             )
         except exceptions.TelegramBadRequest as e:
