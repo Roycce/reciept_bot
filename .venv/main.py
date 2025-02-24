@@ -446,10 +446,9 @@ async def confirm_check(callback_query: types.CallbackQuery):
             logger.error(f"Ошибка отправки админу: {str(e)}")
 
     if success:
-        await callback_query.message.edit_text("✅ Чек подтверждён!")
+        await callback_query.message.answer("✅ Чек подтверждён!")  # Отправляем новое сообщение
     else:
         await callback_query.message.answer("❌ Ошибка при обновлении статуса!")
-
 
 
 @dp.callback_query(lambda c: c.data.startswith("reject_check:"))
@@ -479,7 +478,7 @@ async def reject_check(callback_query: types.CallbackQuery):
             logger.error(f"Ошибка отправки админу: {str(e)}")
 
     if success:
-        await callback_query.message.edit_text("❌ Чек отклонён!")
+        await callback_query.message.answer("❌ Чек отклонён!")  # Отправляем новое сообщение
     else:
         await callback_query.message.answer("❌ Ошибка при обновлении статуса!")
 
