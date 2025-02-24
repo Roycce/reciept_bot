@@ -353,10 +353,25 @@ async def send_check(callback_query: types.CallbackQuery, state: FSMContext):
         await callback_query.message.edit_text(f"❌ Пользователь @{data['username']} не найден!")
         return
 
+    # Генерируем ID чека
+    check_id = str(uuid.uuid4())
+    data["check_id"] = check_id
+
+    # Сохраняем в Google Sheets с временным статусом "Ожидание"
+    try:
+        success = await gsheets.append_data(data, "Ожидание")
+        if not success:
+            raise Exception("Ошибка при добавлении в Google Sheets")
+    except Exception as e:
+        logger.error(f"Ошибка записи в Google Sheets: {str(e)}")
+        await callback_query.message.edit_text("❌ Ошибка при сохранении чека!")
+        return
+
+    # Сохраняем чек во временное хранилище
     async with temp_storage_lock:
-        check_id = str(uuid.uuid4())
         temp_storage[check_id] = data
 
+    # Отправляем пользователю
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
             text="✔ Подтвердить",
@@ -375,7 +390,8 @@ async def send_check(callback_query: types.CallbackQuery, state: FSMContext):
             f"📅 Дата: {data['date']}\n"
             f"💰 Сумма 1: {data['amount1']}\n"
             f"💰 Сумма 2: {data['amount2']}\n"
-            f"📛 ФИО: {data['fullname']}",
+            f"📛 ФИО: {data['fullname']}\n"
+            f"Статус: Ожидание ⏳",
             reply_markup=keyboard
         )
         await callback_query.message.edit_text("✅ Чек успешно отправлен пользователю!")
@@ -386,6 +402,21 @@ async def send_check(callback_query: types.CallbackQuery, state: FSMContext):
     except Exception as e:
         logger.error(f"Ошибка отправки чека: {str(e)}")
         await callback_query.message.edit_text("❌ Ошибка при отправке чека!")
+
+async def update_status_in_sheets(check_data: dict, new_status: str):
+    try:
+        client = await gsheets.client_manager.authorize()
+        spreadsheet = await client.open_by_url(SHEET_URL)
+        worksheet = await spreadsheet.worksheet(WORKSHEET_NAME)
+        rows = await worksheet.get_all_values()
+
+        for i, row in enumerate(rows, start=1):
+            if row and row[0] == check_data["username"] and row[1] == check_data["date"]:
+                await worksheet.update_cell(i, len(row), new_status)
+                return True
+    except Exception as e:
+        logger.error(f"Ошибка обновления статуса в Google Sheets: {str(e)}")
+    return False
 
 
 @dp.callback_query(lambda c: c.data.startswith("confirm_check:"))
@@ -400,11 +431,7 @@ async def confirm_check(callback_query: types.CallbackQuery):
     if not check_data:
         return await callback_query.message.answer("❌ Чек устарел или не найден!")
 
-    try:
-        success = await gsheets.append_data(check_data, "Принят")
-    except Exception as e:
-        logger.error(f"Ошибка записи в Google Sheets: {str(e)}", exc_info=True)
-        success = False
+    success = await update_status_in_sheets(check_data, "Принят ✅")
 
     for admin_id in ADMIN_IDS:
         try:
@@ -413,21 +440,16 @@ async def confirm_check(callback_query: types.CallbackQuery):
                 f"📊 Чек от @{check_data['username']} ({check_data['date']})\n"
                 f"Суммы: {check_data['amount1']}/{check_data['amount2']}\n"
                 f"ФИО: {check_data['fullname']}\n"
-                f"Статус: {'Принят ✅' if success else 'Ошибка записи ❌'}\n"
-                f"Подтвердил: @{callback_query.from_user.username}"
+                f"Статус: {'Принят ✅' if success else 'Ошибка ❌'}"
             )
-        except exceptions.TelegramBadRequest as e:
-            logger.error(f"Админ {admin_id} недоступен: {e}")
         except Exception as e:
-            logger.error(f"Ошибка уведомления админу {admin_id}: {e}")
+            logger.error(f"Ошибка отправки админу: {str(e)}")
 
-    async with temp_storage_lock:
-        temp_storage.pop(check_id, None)
+    if success:
+        await callback_query.message.edit_text("✅ Чек подтверждён!")
+    else:
+        await callback_query.message.answer("❌ Ошибка при обновлении статуса!")
 
-    await callback_query.message.edit_text(
-        "✔ Решение принято. " +
-        ("Данные сохранены" if success else "Ошибка сохранения данных")
-    )
 
 
 @dp.callback_query(lambda c: c.data.startswith("reject_check:"))
@@ -442,13 +464,8 @@ async def reject_check(callback_query: types.CallbackQuery):
     if not check_data:
         return await callback_query.message.answer("❌ Чек устарел или не найден!")
 
-    try:
-        success = await gsheets.append_data(check_data, "Отклонен")
-    except Exception as e:
-        logger.error(f"Ошибка записи в Google Sheets: {str(e)}", exc_info=True)
-        success = False
+    success = await update_status_in_sheets(check_data, "Отклонён ❌")
 
-    # Уведомление админам
     for admin_id in ADMIN_IDS:
         try:
             await bot.send_message(
@@ -456,21 +473,15 @@ async def reject_check(callback_query: types.CallbackQuery):
                 f"📊 Чек от @{check_data['username']} ({check_data['date']})\n"
                 f"Суммы: {check_data['amount1']}/{check_data['amount2']}\n"
                 f"ФИО: {check_data['fullname']}\n"
-                f"Статус: {'Отклонен ❌' if success else 'Ошибка записи ❌'}\n"
-                f"Отклонил: @{callback_query.from_user.username}"
+                f"Статус: {'Отклонён ❌' if success else 'Ошибка ❌'}"
             )
-        except exceptions.TelegramBadRequest as e:
-            logger.error(f"Админ {admin_id} недоступен: {e}")
         except Exception as e:
-            logger.error(f"Ошибка уведомления админу {admin_id}: {e}")
+            logger.error(f"Ошибка отправки админу: {str(e)}")
 
-    async with temp_storage_lock:
-        temp_storage.pop(check_id, None)
-
-    await callback_query.message.edit_text(
-        "✔ Решение принято. " +
-        ("Данные сохранены" if success else "Ошибка сохранения данных")
-    )
+    if success:
+        await callback_query.message.edit_text("❌ Чек отклонён!")
+    else:
+        await callback_query.message.answer("❌ Ошибка при обновлении статуса!")
 
 
 async def main():
