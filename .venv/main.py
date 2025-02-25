@@ -34,8 +34,8 @@ ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "").split(","))) if os.getenv("
 
 # Константы
 DATA_FILE = "users.json"
-SHEET_URL = "https://docs.google.com/spreadsheets/d/1sdiMF4mWAdwPzxa6h7iW8tSNX4_VwIixG8icXs70bqY"
-WORKSHEET_NAME = "Sheet1"
+SHEET_URL = os.getenv("SHEET_URL")
+WORKSHEET_NAME = os.getenv("WORKSHEET_NAME")
 
 # Инициализация бота и диспетчера
 bot = Bot(token=API_TOKEN)
@@ -72,6 +72,7 @@ class GoogleSheetsManager:
             spreadsheet = await client.open_by_url(SHEET_URL)
             worksheet = await spreadsheet.worksheet(WORKSHEET_NAME)
             row = [
+                data["check_id"],
                 data["username"],
                 data["date"],
                 data["amount1"],
@@ -411,7 +412,7 @@ async def update_status_in_sheets(check_data: dict, new_status: str):
         rows = await worksheet.get_all_values()
 
         for i, row in enumerate(rows, start=1):
-            if row and row[0] == check_data["username"] and row[1] == check_data["date"]:
+            if row and row[0] == check_data["check_id"]:
                 await worksheet.update_cell(i, len(row), new_status)
                 return True
     except Exception as e:
@@ -445,6 +446,8 @@ async def confirm_check(callback_query: types.CallbackQuery):
         except Exception as e:
             logger.error(f"Ошибка отправки админу: {str(e)}")
 
+    await callback_query.message.edit_reply_markup(reply_markup=None)
+
     if success:
         await callback_query.message.answer("✅ Чек подтверждён!")  # Отправляем новое сообщение
     else:
@@ -476,6 +479,8 @@ async def reject_check(callback_query: types.CallbackQuery):
             )
         except Exception as e:
             logger.error(f"Ошибка отправки админу: {str(e)}")
+
+    await callback_query.message.edit_reply_markup(reply_markup=None)
 
     if success:
         await callback_query.message.answer("❌ Чек отклонён!")  # Отправляем новое сообщение
