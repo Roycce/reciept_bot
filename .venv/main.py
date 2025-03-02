@@ -340,9 +340,31 @@ async def process_fullname(message: types.Message, state: FSMContext):
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Отправить", callback_data="send_check"),
-         InlineKeyboardButton(text="🔄 Переделать", callback_data="redo_check")]
+             InlineKeyboardButton(text="🔄 Переделать", callback_data="redo_check")]
     ])
     await message.answer(check_preview, reply_markup=keyboard, parse_mode="Markdown")
+
+@dp.callback_query(lambda c: c.data == "redo_check")
+async def redo_check(callback_query: types.CallbackQuery, state: FSMContext):
+    try:
+        # Очищаем состояние для перезапуска процесса
+        await state.clear()
+
+        # Редактируем сообщение, чтобы убрать inline-клавиатуру
+        await callback_query.message.edit_text(
+            "❌ Создание чека отменено. Начинаем заново!",
+            reply_markup=None  # Удаляем inline-клавиатуру
+        )
+
+        # Отправляем новое сообщение с инструкцией
+        await callback_query.message.answer(
+            "👤 Введите юзернейм *без @*, заметку или юзер id получателя:",
+            parse_mode="Markdown",
+            reply_markup=get_cancel_keyboard()  # Используем другую клавиатуру
+        )
+    except Exception as e:
+        logging.error(f"Ошибка в redo_check: {e}")
+
 
 
 @dp.callback_query(lambda c: c.data == "send_check")
