@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 from gspread_asyncio import AsyncioGspreadClientManager
 from oauth2client.service_account import ServiceAccountCredentials
 
+
 # Logging setup
 logging.basicConfig(
     level=logging.INFO,
@@ -49,8 +50,8 @@ temp_storage_lock = asyncio.Lock()
 class CheckForm(StatesGroup):
     username = State()
     date = State()
-    amount1 = State()
-    amount2 = State()
+    cash = State()
+    noncash = State()
     fullname = State()
 
 
@@ -71,15 +72,23 @@ class GoogleSheetsManager:
             client = await self.client_manager.authorize()
             spreadsheet = await client.open_by_url(SHEET_URL)
             worksheet = await spreadsheet.worksheet(WORKSHEET_NAME)
+
+            # Получаем заметку из данных пользователя
+            users = load_users()
+            user_note = users.get(data["username"], {}).get("note", "")
+
+            # Формируем строку с заметкой в последнем столбце
             row = [
                 data["check_id"],
                 data["username"],
                 data["date"],
-                data["amount1"],
-                data["amount2"],
+                data["cash"],
+                data["noncash"],
                 data["fullname"],
-                status
+                status,
+                user_note  # Добавляем заметку в последний столбец
             ]
+
             await worksheet.append_row(row)
             return True
         except Exception as e:
@@ -129,7 +138,7 @@ def get_date_keyboard() -> ReplyKeyboardMarkup:
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     users = load_users()
-    username = message.from_user.username
+    username = message.from_user.username or f"ID_{message.from_user.id}"
     user_id = message.from_user.id
 
     if username:
@@ -146,7 +155,7 @@ async def cmd_start(message: types.Message):
             try:
                 await bot.send_message(
                     admin_id,
-                    f"👤 New user: @{username or 'Not specified'} (ID: {user_id})"
+                    f"👤 New user: @{username if username != f'ID_{message.from_user.id}' else 'Not specified'} (ID: {user_id})"
                 )
             except Exception as e:
                 logger.error(f"Admin notification error: {e}")
@@ -175,6 +184,7 @@ async def cmd_add_user(message: types.Message):
 
     users = load_users()
     users[username] = {"user_id": int(user_id), "note": note}
+
     save_users(users)
 
     await message.answer(f"✅ User @{username} (ID: {user_id}) added! Note: {note}")
@@ -277,48 +287,91 @@ async def process_date(message: types.Message, state: FSMContext):
             datetime.strptime(message.text, "%d.%m.%Y")
             date = message.text
         except ValueError:
-            return await message.answer("❌ Invalid format! Use DD.MM.YYYY")
+            await message.answer("❌ Invalid format! Use DD.MM.YYYY")
+            await state.set_state(CheckForm.date)  # Повторно запросить дату
+            return
 
     await state.update_data(date=date)
-    await state.set_state(CheckForm.amount1)
+    await state.set_state(CheckForm.cash)
     await message.answer(
-        "💰 Enter amount 1:",
+        "💰 Enter cash:",
         reply_markup=get_cancel_keyboard(),
     )
 
 
-@dp.message(CheckForm.amount1)
-async def process_amount1(message: types.Message, state: FSMContext):
+@dp.message(CheckForm.cash)
+async def process_cash(message: types.Message, state: FSMContext):
     if message.text == "❌ Cancel":
         await state.clear()
         return await message.answer("❌ Receipt creation canceled.", reply_markup=types.ReplyKeyboardRemove())
 
     if not message.text.isdigit():
-        return await message.answer("❌ Amount must be a number!")
+        return await message.answer("❌ Cash must be a number!")
 
-    await state.update_data(amount1=message.text)
-    await state.set_state(CheckForm.amount2)
+    await state.update_data(cash=message.text)
+    await state.set_state(CheckForm.noncash)
     await message.answer(
-        "💰 Enter amount 2:",
+        "💰 Enter Non cash:",
         reply_markup=get_cancel_keyboard(),
     )
 
 
-@dp.message(CheckForm.amount2)
-async def process_amount2(message: types.Message, state: FSMContext):
+@dp.message(CheckForm.noncash)
+async def process_noncash(message: types.Message, state: FSMContext):
     if message.text == "❌ Cancel":
         await state.clear()
         return await message.answer("❌ Receipt creation canceled.", reply_markup=types.ReplyKeyboardRemove())
 
     if not message.text.isdigit():
-        return await message.answer("❌ Amount must be a number!")
+        return await message.answer("❌ Cash must be a number!")
 
-    await state.update_data(amount2=message.text)
-    await state.set_state(CheckForm.fullname)
-    await message.answer(
-        "📛 Enter the recipient's full name:",
-        reply_markup=get_cancel_keyboard(),
-    )
+    await state.update_data(noncash=message.text)
+
+    # Получаем данные о пользователе
+    data = await state.get_data()
+    username = data.get("username")
+    users = load_users()
+    user_note = users.get(username, {}).get("note", "")
+
+    # Если есть заметка, предлагаем её использовать
+    if user_note:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"✅ Use note: {user_note}", callback_data="use_note")],
+            [InlineKeyboardButton(text="📝 Enter manually", callback_data="enter_manually")]
+        ])
+        await message.answer(
+            f"📛 We found a note for this user: {user_note}\n"
+            "Do you want to use it as the full name?",
+            reply_markup=keyboard,
+        )
+    else:
+        # Если заметки нет, переходим к вводу полного имени
+        await state.set_state(CheckForm.fullname)
+        await message.answer(
+            "📛 Enter the recipient's full name:",
+            reply_markup=get_cancel_keyboard(),
+        )
+
+
+# Обработка inline-кнопок
+@dp.callback_query(lambda c: c.data in ["use_note", "enter_manually"])
+async def handle_fullname_choice(callback_query: types.CallbackQuery, state: FSMContext):
+    if callback_query.data == "use_note":
+        # Используем заметку как полное имя
+        data = await state.get_data()
+        username = data.get("username")
+        users = load_users()
+        user_note = users.get(username, {}).get("note", "")
+
+        await state.update_data(fullname=user_note)
+        await callback_query.message.edit_text(f"✅ Full name set to: {user_note}")
+
+        # Переходим к следующему шагу (например, предпросмотру чека)
+        await preview_check(callback_query.message, state)
+    else:
+        # Запрашиваем ввод полного имени вручную
+        await callback_query.message.edit_text("📛 Enter the recipient's full name:")
+        await state.set_state(CheckForm.fullname)
 
 
 @dp.message(CheckForm.fullname)
@@ -330,20 +383,32 @@ async def process_fullname(message: types.Message, state: FSMContext):
     await state.update_data(fullname=message.text)
     data = await state.get_data()
 
+    # Переходим к предпросмотру чека
+    await preview_check(message, state)
+
+
+async def preview_check(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+
+    # Получаем заметку из данных пользователя
+    users = load_users()
+    user_note = users.get(data["username"], {}).get("note", "")
+
     check_preview = (
-        "📋 *Receipt Preview*\n"
-        f"👤: @{data['username']}\n"
-        f"📅 Date: {data['date']}\n"
-        f"💰 Amount 1: {data['amount1']}\n"
-        f"💰 Amount 2: {data['amount2']}\n"
-        f"📛 Full Name: {data['fullname']}"
+        f"📋 <b>Receipt Preview</b>\n"
+        f"👤: @{data.get('username', 'Unknown')}\n"
+        f"📅 Date: {data.get('date', 'Unknown')}\n"
+        f"💰 Cash: {data.get('cash', '0')}\n"
+        f"💰 Non cash: {data.get('noncash', '0')}\n"
+        f"📛 Full Name: {data.get('fullname', 'Unknown')}\n"
+        f"📝 Note: {user_note if user_note else 'No note'}"  # Добавляем заметку в предпросмотр
     )
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Send", callback_data="send_check"),
          InlineKeyboardButton(text="🔄 Redo", callback_data="redo_check")]
     ])
-    await message.answer(check_preview, reply_markup=keyboard, parse_mode="Markdown")
+    await message.answer(check_preview, reply_markup=keyboard, parse_mode="HTML")
 
 @dp.callback_query(lambda c: c.data == "redo_check")
 async def redo_check(callback_query: types.CallbackQuery, state: FSMContext):
@@ -375,11 +440,11 @@ async def send_check(callback_query: types.CallbackQuery, state: FSMContext):
         await callback_query.message.edit_text(f"❌ User @{data['username']} not found!")
         return
 
-    # Generate receipt ID
+    # Генерация ID чека
     check_id = str(uuid.uuid4())
     data["check_id"] = check_id
 
-    # Save to Google Sheets with temporary status "Pending"
+    # Сохранение в Google Sheets с заметкой
     try:
         success = await gsheets.append_data(data, "Pending")
         if not success:
@@ -389,11 +454,11 @@ async def send_check(callback_query: types.CallbackQuery, state: FSMContext):
         await callback_query.message.edit_text("❌ Error saving receipt!")
         return
 
-    # Save receipt to temporary storage
+    # Сохранение чека во временное хранилище
     async with temp_storage_lock:
         temp_storage[check_id] = data
 
-    # Send to user
+    # Отправка пользователю
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
             text="✔ Confirm",
@@ -410,8 +475,8 @@ async def send_check(callback_query: types.CallbackQuery, state: FSMContext):
             user_id,
             f"🔔 A receipt has been sent to you for confirmation:\n"
             f"📅 Date: {data['date']}\n"
-            f"💰 Amount 1: {data['amount1']}\n"
-            f"💰 Amount 2: {data['amount2']}\n"
+            f"💰 Cash: {data['cash']}\n"
+            f"💰 Non cash: {data['noncash']}\n"
             f"📛 Full Name: {data['fullname']}\n"
             f"Status: Pending ⏳",
             reply_markup=keyboard
@@ -431,15 +496,30 @@ async def update_status_in_sheets(check_data: dict, new_status: str):
         client = await gsheets.client_manager.authorize()
         spreadsheet = await client.open_by_url(SHEET_URL)
         worksheet = await spreadsheet.worksheet(WORKSHEET_NAME)
-        rows = await worksheet.get_all_values()
 
-        for i, row in enumerate(rows, start=1):
+        # Получаем все строки и заголовки
+        rows = await worksheet.get_all_values()
+        headers = rows[0]  # Первая строка — заголовки
+
+        # Находим индекс столбца "Status" (или другого, где хранится статус)
+        status_column_index = headers.index("Status") if "Status" in headers else -1
+
+        if status_column_index == -1:
+            logger.error("Column 'Status' not found in the sheet!")
+            return False
+
+        # Ищем строку с нужным check_id
+        for i, row in enumerate(rows[1:], start=2):  # Пропускаем заголовки
             if row and row[0] == check_data["check_id"]:
-                await worksheet.update_cell(i, len(row), new_status)
+                # Обновляем статус в нужном столбце
+                await worksheet.update_cell(i, status_column_index + 1, new_status)
                 return True
+
+        logger.error(f"Row with check_id {check_data['check_id']} not found!")
+        return False
     except Exception as e:
         logger.error(f"Google Sheets status update error: {str(e)}")
-    return False
+        return False
 
 
 @dp.callback_query(lambda c: c.data.startswith("confirm_check:"))
@@ -461,7 +541,7 @@ async def confirm_check(callback_query: types.CallbackQuery):
             await bot.send_message(
                 admin_id,
                 f"📊 Receipt from @{check_data['username']} ({check_data['date']})\n"
-                f"Amounts: {check_data['amount1']}/{check_data['amount2']}\n"
+                f"Amounts: {check_data['cash']}/{check_data['noncash']}\n"
                 f"Full Name: {check_data['fullname']}\n"
                 f"Status: {'Accepted ✅' if success else 'Error ❌'}"
             )
@@ -495,7 +575,7 @@ async def reject_check(callback_query: types.CallbackQuery):
             await bot.send_message(
                 admin_id,
                 f"📊 Receipt from @{check_data['username']} ({check_data['date']})\n"
-                f"Amounts: {check_data['amount1']}/{check_data['amount2']}\n"
+                f"Amounts: {check_data['cash']}/{check_data['noncash']}\n"
                 f"Full Name: {check_data['fullname']}\n"
                 f"Status: {'Rejected ❌' if success else 'Error ❌'}"
             )
